@@ -5,13 +5,32 @@ from datetime import datetime
 from requests.auth import HTTPBasicAuth
 
 st.set_page_config(page_title="Suivi des utilisateurs DHIS2", layout="wide")
-
 st.title("🔐 Connexion à DHIS2 et Analyse des Utilisateurs")
 
 # --- Connexion à DHIS2
-dhis2_url = st.text_input("🌍 URL de l'instance DHIS2", "https://play.dhis2.org/40.0")
+dhis2_url = "https://togo.dhis2.org/dhis"
 username = st.text_input("👤 Nom d'utilisateur", type="default")
 password = st.text_input("🔑 Mot de passe", type="password")
+
+# Fonction pour récupérer la dernière activité par utilisateur depuis l'API audit
+def get_last_activity_per_user(dhis2_url, username, password):
+    st.info("⏳ Récupération des activités (audits)...")
+    audit_url = f"{dhis2_url}/api/audits/dataValue?fields=user,created&paging=false"
+    response = requests.get(audit_url, auth=HTTPBasicAuth(username, password))
+    if response.status_code != 200:
+        st.warning("⚠️ Impossible de récupérer les données d'audit.")
+        return {}
+
+    audits = response.json().get("audits", [])
+    activity = {}
+    for audit in audits:
+        user = audit.get("user")
+        created = audit.get("created")
+        if user and created:
+            created_dt = pd.to_datetime(created)
+            if user not in activity or created_dt > activity[user]:
+                activity[user] = created_dt
+    return activity
 
 if st.button("Se connecter"):
     with st.spinner("Connexion à DHIS2..."):
@@ -44,8 +63,6 @@ if st.button("Se connecter"):
         })
 
     df = pd.DataFrame(data)
-
-    # Convertir la date de création en datetime
     df["Date de création"] = pd.to_datetime(df["Date de création"])
 
     # --- Détection des doublons
@@ -53,17 +70,11 @@ if st.button("Se connecter"):
     dupes = df[df.duplicated("Nom complet", keep=False)]
     st.dataframe(dupes)
 
-    # --- Dernière activité (commande)
-    st.subheader("📦 Dernière commande enregistrée")
-
-    # Exemple : extraire dernière activité via `dataValueSets` (à adapter selon ton instance)
-    # On prend la date du dernier formulaire soumis par utilisateur fictif
-    def get_days_since_last_submission(user_name):
-        return pd.Timestamp.now() - pd.Timestamp("2024-12-01")  # valeur fictive
-
-    df["Jours depuis dernière activité"] = df["Nom d'utilisateur"].apply(
-        lambda x: get_days_since_last_submission(x).days
-    )
+    # --- Dernière activité réelle
+    st.subheader("📦 Dernière activité enregistrée (via audit)")
+    last_activity_dict = get_last_activity_per_user(dhis2_url, username, password)
+    df["Dernière activité"] = df["Nom d'utilisateur"].map(last_activity_dict)
+    df["Jours depuis dernière activité"] = (pd.Timestamp.now() - df["Dernière activité"]).dt.days
 
     st.dataframe(df)
 
