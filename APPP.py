@@ -1,82 +1,55 @@
 import streamlit as st
 import pandas as pd
 import requests
-import base64
+from requests.auth import HTTPBasicAuth
 from datetime import datetime
 
-st.set_page_config(page_title="Utilisateurs DHIS2 - Analyse", layout="wide")
-st.title("🔐 Analyse des Utilisateurs DHIS2")
+st.set_page_config(page_title="Analyse des Utilisateurs DHIS2", layout="wide")
 
-# Connexion DHIS2 avec en-tête encodé
-def get_auth_header(username, password):
-    token = f"{username}:{password}"
-    encoded = base64.b64encode(token.encode()).decode("utf-8")
-    return {"Authorization": f"Basic {encoded}"}
+st.sidebar.header("🔧 Paramètres de Connexion")
+url = st.sidebar.text_input("🌐 URL DHIS2", value="https://togo.dhis2.org/dhis")
+username = st.sidebar.text_input("👤 Nom d'utilisateur")
+password = st.sidebar.text_input("🔑 Mot de passe", type="password")
 
-# Récupération des utilisateurs
-def get_users(dhis2_url, headers):
-    url = f"{dhis2_url}/api/users.json"
-    params = {
-        "fields": "id,name,created,userCredentials[username],organisationUnits[id,name]",
-        "paging": "false"
-    }
-    response = requests.get(url, headers=headers, params=params)
-    if response.status_code == 200:
-        return response.json().get("users", [])
-    else:
-        st.error("❌ Échec de récupération des utilisateurs.")
-        return []
+if st.sidebar.button("📥 Charger les données"):
+    with st.spinner("Chargement des utilisateurs..."):
+        api_url = f"{url}/api/users.json?fields=id,displayName,userCredentials[username,lastLogin],organisationUnits[id,name]&paging=false"
+        response = requests.get(api_url, auth=HTTPBasicAuth(username, password))
 
-# Dernières connexions
-def get_user_logins(dhis2_url, headers):
-    url = f"{dhis2_url}/api/userCredentials?fields=username,lastLogin&paging=false"
-    response = requests.get(url, headers=headers)
-    if response.status_code == 200:
-        return response.json().get("userCredentials", [])
-    return []
+        if response.status_code != 200:
+            st.error(f"Erreur lors de l'accès à l'API : {response.status_code}")
+        else:
+            data = response.json()
+            users = []
 
-# Interface
-with st.sidebar:
-    st.header("🔧 Paramètres de Connexion")
-    dhis2_url = st.text_input("🌐 URL DHIS2", value="https://togo.dhis2.org/dhis")
-    username = st.text_input("👤 Nom d'utilisateur")
-    password = st.text_input("🔑 Mot de passe", type="password")
-
-if dhis2_url and username and password:
-    headers = get_auth_header(username, password)
-
-    if st.sidebar.button("📥 Charger les données"):
-        with st.spinner("Connexion à DHIS2 et chargement des données..."):
-            users = get_users(dhis2_url, headers)
-            logins = get_user_logins(dhis2_url, headers)
-            login_map = {entry["username"]: entry.get("lastLogin") for entry in logins}
-
-            data = []
-            for user in users:
-                uname = user.get("userCredentials", {}).get("username", "")
-                org_units = ", ".join([ou["name"] for ou in user.get("organisationUnits", [])])
-                last_login = login_map.get(uname)
-                data.append({
-                    "Nom complet": user.get("name", ""),
-                    "Nom d'utilisateur": uname,
-                    "Date de création": user.get("created", ""),
-                    "Unités d'organisation": org_units,
-                    "Dernière connexion": last_login
+            for user in data.get("users", []):
+                display_name = user.get("displayName", "")
+                username = user.get("userCredentials", {}).get("username", "")
+                last_login_raw = user.get("userCredentials", {}).get("lastLogin")
+                last_login = (
+                    datetime.strptime(last_login_raw, "%Y-%m-%dT%H:%M:%S.%f")
+                    if last_login_raw else None
+                )
+                org_units = [ou["name"] for ou in user.get("organisationUnits", [])]
+                users.append({
+                    "Nom complet": display_name,
+                    "Nom d'utilisateur": username,
+                    "Dernière connexion": last_login,
+                    "Unités d'organisation": ", ".join(org_units),
                 })
 
-            df = pd.DataFrame(data)
-            df["Date de création"] = pd.to_datetime(df["Date de création"])
-            df["Dernière connexion"] = pd.to_datetime(df["Dernière connexion"], errors="coerce")
-            df["Jours depuis dernière connexion"] = (pd.Timestamp.now() - df["Dernière connexion"]).dt.days
-            df["Doublon (Nom complet)"] = df.duplicated("Nom complet", keep=False).map({True: "Oui", False: "Non"})
-
-            st.success(f"✅ {len(df)} utilisateurs chargés depuis DHIS2.")
-            st.dataframe(df, use_container_width=True)
-
-            csv = df.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                label="⬇️ Télécharger les données (CSV)",
-                data=csv,
-                file_name="utilisateurs_dhis2.csv",
-                mime="text/csv"
+            df = pd.DataFrame(users)
+            df["Jours depuis dernière connexion"] = df["Dernière connexion"].apply(
+                lambda x: (datetime.now() - x).days if pd.notnull(x) else "Inconnu"
             )
+            df["Doublon (Nom complet)"] = df.duplicated(subset=["Nom complet"], keep=False).map({True: "Oui", False: "Non"})
+
+            # Interface de sélection d’unité d’organisation
+            all_org_units = sorted(set(sum((row.split(", ") for row in df["Unités d'organisation"]), [])))
+            selected_unit = st.selectbox("🏥 Sélectionnez une unité d'organisation", ["Toutes"] + all_org_units)
+
+            if selected_unit != "Toutes":
+                df = df[df["Unités d'organisation"].str.contains(selected_unit)]
+
+            st.success(f"{len(df)} utilisateurs affichés.")
+            st.dataframe(df, use_container_width=True)
